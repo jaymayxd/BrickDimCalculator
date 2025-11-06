@@ -1,7 +1,8 @@
+
 import React, { useState, useCallback, useEffect } from 'react';
 import { CalculationResult } from '../types';
 import { STANDARD_MORTAR_JOINT_MM, BRICK_TYPES } from '../constants';
-import { RulerIcon, BrickIcon, MortarIcon } from './icons';
+import { RulerIcon, BrickIcon, MortarIcon, SaveIcon, LoadIcon } from './icons';
 
 // Define child components outside the parent to prevent re-renders
 interface InputFieldProps {
@@ -36,24 +37,29 @@ const InputField: React.FC<InputFieldProps> = ({ label, value, onChange, icon, u
   </div>
 );
 
+type ConnectionType = 'CO-' | 'CO+' | 'CO' | 'HALF_BRICK_LEFT' | 'HALF_BRICK_RIGHT' | 'OVERALL' | 'OPENING';
 
 interface BrickVisualizerProps {
     units: number;
     unitLength: number;
     mortarJoint: number;
+    connectionType: ConnectionType;
 }
 
-const BrickVisualizer: React.FC<BrickVisualizerProps> = ({ units, unitLength, mortarJoint }) => {
-    const unitArray = [];
-    let remainingUnits = units;
+const BrickVisualizer: React.FC<BrickVisualizerProps> = ({ units, unitLength, mortarJoint, connectionType }) => {
+    const unitArray: (1 | 0.5)[] = [];
+    const fullUnits = Math.floor(units);
+    const hasHalfUnit = units % 1 !== 0;
 
-    while (remainingUnits > 0) {
-        if (remainingUnits >= 1) {
-            unitArray.push(1);
-            remainingUnits -= 1;
-        } else if (remainingUnits > 0) {
-            unitArray.push(0.5);
-            remainingUnits = 0;
+    for (let i = 0; i < fullUnits; i++) {
+        unitArray.push(1);
+    }
+
+    if (hasHalfUnit) {
+        if (connectionType === 'HALF_BRICK_LEFT') {
+            unitArray.unshift(0.5); // Prepend for left
+        } else {
+            unitArray.push(0.5); // Append for right or default
         }
     }
 
@@ -191,9 +197,25 @@ const DimensionResultDisplay: React.FC<DimensionResultDisplayProps> = ({ label, 
     </div>
 );
 
-type ConnectionType = 'CO-' | 'CO+' | 'CO';
 type CalculatorMode = 'dimension' | 'units';
 type CalculationAxis = 'length' | 'height';
+
+const LOCAL_STORAGE_KEY = 'brickCalculatorParams';
+
+interface SavedCalculationState {
+  calculationAxis: CalculationAxis;
+  mode: CalculatorMode;
+  selectedBrickType: string;
+  brickLength: string;
+  brickHeight: string;
+  mortarJoint: string;
+  connectionType: ConnectionType;
+  targetDimension: string;
+  inputUnit: Unit;
+  numberOfUnits: string;
+  outputUnit: Unit;
+}
+
 
 const BrickCalculator: React.FC = () => {
   const [calculationAxis, setCalculationAxis] = useState<CalculationAxis>('length');
@@ -218,11 +240,31 @@ const BrickCalculator: React.FC = () => {
 
   // Output unit state
   const [outputUnit, setOutputUnit] = useState<Unit>('mm');
+
+  // Save/Load state
+  const [hasSavedData, setHasSavedData] = useState(false);
+  const [saveMessage, setSaveMessage] = useState('');
+
+  useEffect(() => {
+    const savedData = localStorage.getItem(LOCAL_STORAGE_KEY);
+    if (savedData) {
+      setHasSavedData(true);
+    }
+  }, []);
   
   const isLength = calculationAxis === 'length';
   const dimensionTerm = isLength ? 'Dimension' : 'Height';
   const unitsTerm = isLength ? 'Units' : 'Courses';
   const lengthTerm = isLength ? 'Length' : 'Height';
+
+  const handleAxisChange = (axis: CalculationAxis) => {
+    setCalculationAxis(axis);
+    if (axis === 'length') {
+        setConnectionType('CO-');
+    } else {
+        setConnectionType('OVERALL');
+    }
+  };
 
   const handleInputUnitChange = (newUnit: Unit) => {
     const currentValue = parseFloat(targetDimension);
@@ -269,13 +311,20 @@ const BrickCalculator: React.FC = () => {
     }
 
     let idealUnits: number;
-    if (connectionType === 'CO+') {
+    if (connectionType === 'CO+' || connectionType === 'OPENING') {
       idealUnits = targetInMm / effectiveUnitSize;
     } else {
       idealUnits = (targetInMm + joint) / effectiveUnitSize;
     }
     
-    const unitsNeeded = isLength ? Math.round(idealUnits * 2) / 2 : Math.round(idealUnits);
+    let unitsNeeded: number;
+    if (isLength && (connectionType === 'HALF_BRICK_LEFT' || connectionType === 'HALF_BRICK_RIGHT')) {
+        // Force a half-brick bond. Find the nearest number of full bricks and add 0.5.
+        const fullBricks = Math.round(idealUnits - 0.5);
+        unitsNeeded = Math.max(0.5, fullBricks + 0.5); // Ensure at least a half brick
+    } else {
+        unitsNeeded = isLength ? Math.round(idealUnits * 2) / 2 : Math.round(idealUnits);
+    }
 
     if (unitsNeeded <= 0) {
         setError(`Calculation resulted in zero or fewer ${unitsTerm.toLowerCase()}. Please check your inputs.`);
@@ -284,7 +333,7 @@ const BrickCalculator: React.FC = () => {
     }
 
     let adjustedDimension: number;
-    if (connectionType === 'CO+') {
+    if (connectionType === 'CO+' || connectionType === 'OPENING') {
       adjustedDimension = unitsNeeded * unitSize + unitsNeeded * joint;
     } else {
       const numJoints = Math.ceil(unitsNeeded > 1 ? unitsNeeded - 1 : 0);
@@ -311,7 +360,7 @@ const BrickCalculator: React.FC = () => {
     setError('');
 
     let totalDimension: number;
-    if (connectionType === 'CO+') {
+    if (connectionType === 'CO+' || connectionType === 'OPENING') {
       totalDimension = units * unitSize + units * joint;
     } else {
       const numJoints = Math.ceil(units > 1 ? units - 1 : 0);
@@ -341,12 +390,73 @@ const BrickCalculator: React.FC = () => {
         calculateDimensionFromUnits();
     }
   };
+
+  const handleSave = () => {
+    const stateToSave: SavedCalculationState = {
+      calculationAxis,
+      mode,
+      selectedBrickType,
+      brickLength,
+      brickHeight,
+      mortarJoint,
+      connectionType,
+      targetDimension,
+      inputUnit,
+      numberOfUnits,
+      outputUnit,
+    };
+    try {
+      localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(stateToSave));
+      setHasSavedData(true);
+      setSaveMessage('Calculation saved!');
+      setTimeout(() => setSaveMessage(''), 3000);
+    } catch (error) {
+      console.error("Could not save calculation to localStorage", error);
+      setSaveMessage('Error saving calculation.');
+      setTimeout(() => setSaveMessage(''), 3000);
+    }
+  };
+
+  const handleLoad = () => {
+    try {
+      const savedData = localStorage.getItem(LOCAL_STORAGE_KEY);
+      if (savedData) {
+        const parsedData: SavedCalculationState = JSON.parse(savedData);
+        setCalculationAxis(parsedData.calculationAxis);
+        setMode(parsedData.mode);
+        setSelectedBrickType(parsedData.selectedBrickType);
+        setBrickLength(parsedData.brickLength);
+        setBrickHeight(parsedData.brickHeight);
+        setMortarJoint(parsedData.mortarJoint);
+        setConnectionType(parsedData.connectionType);
+        setTargetDimension(parsedData.targetDimension);
+        setInputUnit(parsedData.inputUnit);
+        setNumberOfUnits(parsedData.numberOfUnits);
+        setOutputUnit(parsedData.outputUnit);
+        setSaveMessage('Calculation loaded!');
+        setTimeout(() => setSaveMessage(''), 3000);
+      }
+    } catch (error) {
+      console.error("Could not load calculation from localStorage", error);
+      setSaveMessage('Error loading calculation.');
+      setTimeout(() => setSaveMessage(''), 3000);
+    }
+  };
   
-  const connectionTypes: { id: ConnectionType; label: string; description: string }[] = [
-      { id: 'CO-', label: 'CO-', description: 'Between Faces: For walls built between two existing points. Calculated as Work Size.' },
-      { id: 'CO', label: 'CO', description: 'Overall Length: For the total length of a standalone wall. Calculated as Work Size.' },
-      { id: 'CO+', label: 'CO+', description: 'Opening Size: For openings like windows or doors. Calculated as Co-ordinating Size.' },
+  const lengthConnectionTypes: { id: ConnectionType; label: string; description: string }[] = [
+      { id: 'CO-', label: 'CO-', description: 'Between Faces: Standard calculation for walls between two points.' },
+      { id: 'CO', label: 'CO', description: 'Overall Length: Standard calculation for a standalone wall.' },
+      { id: 'CO+', label: 'CO+', description: 'Opening Size: For openings like windows or doors.' },
+      { id: 'HALF_BRICK_LEFT', label: 'Half Brick Left', description: 'Forces the calculation to start with a half brick.' },
+      { id: 'HALF_BRICK_RIGHT', label: 'Half Brick Right', description: 'Forces the calculation to end with a half brick.' },
   ];
+
+  const heightConnectionTypes: { id: ConnectionType; label: string; description: string }[] = [
+    { id: 'OVERALL', label: 'Overall', description: 'For a complete wall, measured to the top of the final course of bricks (no mortar joint on top).' },
+    { id: 'OPENING', label: 'Opening', description: 'For an opening (e.g., for a window or door), measured to the underside of the lintel (includes the mortar joint on top of the final course).' },
+  ];
+
+  const connectionTypes = isLength ? lengthConnectionTypes : heightConnectionTypes;
 
   const hasResult = (mode === 'dimension' && result) || (mode === 'units' && dimensionResult);
 
@@ -355,10 +465,10 @@ const BrickCalculator: React.FC = () => {
       <div className="bg-white p-6 rounded-xl shadow-lg">
          <div className="mb-4">
             <div className="flex p-1 bg-slate-100 rounded-lg">
-                <button onClick={() => setCalculationAxis('length')} className={`flex-1 py-2 text-sm font-semibold rounded-md transition-colors ${calculationAxis === 'length' ? 'bg-white text-orange-600 shadow-sm' : 'text-slate-600 hover:bg-slate-200'}`}>
+                <button onClick={() => handleAxisChange('length')} className={`flex-1 py-2 text-sm font-semibold rounded-md transition-colors ${calculationAxis === 'length' ? 'bg-white text-orange-600 shadow-sm' : 'text-slate-600 hover:bg-slate-200'}`}>
                     Length Calculator
                 </button>
-                <button onClick={() => setCalculationAxis('height')} className={`flex-1 py-2 text-sm font-semibold rounded-md transition-colors ${calculationAxis === 'height' ? 'bg-white text-orange-600 shadow-sm' : 'text-slate-600 hover:bg-slate-200'}`}>
+                <button onClick={() => handleAxisChange('height')} className={`flex-1 py-2 text-sm font-semibold rounded-md transition-colors ${calculationAxis === 'height' ? 'bg-white text-orange-600 shadow-sm' : 'text-slate-600 hover:bg-slate-200'}`}>
                     Height Calculator
                 </button>
             </div>
@@ -391,125 +501,153 @@ const BrickCalculator: React.FC = () => {
             </nav>
         </div>
         
-        <form onSubmit={handleSubmit} className="space-y-4">
-          {mode === 'dimension' ? (
-             <div className="flex flex-col gap-1.5">
-                <label htmlFor="target-dimension" className="text-sm font-medium text-slate-600 flex items-center gap-2">
-                    <RulerIcon className="w-5 h-5 text-slate-400" />
-                    {`Target ${dimensionTerm}`}
-                </label>
-                <div className="flex items-center gap-2">
-                    <div className="relative flex-grow">
-                        <input
-                            id="target-dimension"
-                            type="number"
-                            value={targetDimension}
-                            onChange={(e) => setTargetDimension(e.target.value)}
-                            className="w-full pl-4 pr-4 py-2 bg-slate-50 border border-slate-300 rounded-md shadow-sm focus:bg-white focus:ring-2 focus:ring-orange-500 focus:border-orange-500 transition"
-                            aria-label={`Target ${dimensionTerm}`}
-                        />
-                    </div>
-                    <UnitSelector selectedUnit={inputUnit} onUnitChange={handleInputUnitChange} />
-                </div>
-            </div>
-           ) : (
-            <InputField
-                label={`Number of ${unitsTerm}`}
-                value={numberOfUnits}
-                onChange={(e) => setNumberOfUnits(e.target.value)}
-                icon={<BrickIcon className="w-5 h-5 text-slate-400" />}
-                step={isLength ? "0.5" : "1"}
-            />
-           )}
-
-          <fieldset className="flex flex-col gap-1.5">
-            <legend className="text-sm font-medium text-slate-600">Connection Type</legend>
-            <div className="grid grid-cols-3 gap-1 bg-slate-200 p-1 rounded-md">
-                {connectionTypes.map(type => (
-                    <div key={type.id} className="relative group flex justify-center">
-                        <input
-                            type="radio"
-                            id={type.id}
-                            name="connectionType"
-                            value={type.id}
-                            checked={connectionType === type.id}
-                            onChange={() => setConnectionType(type.id)}
-                            className="sr-only"
-                        />
-                        <label
-                            htmlFor={type.id}
-                            className={`w-full block text-center text-sm font-semibold py-2 px-1 rounded cursor-pointer transition-colors duration-200 ${
-                                connectionType === type.id
-                                    ? 'bg-white text-orange-600 shadow-sm'
-                                    : 'bg-transparent text-slate-600 hover:bg-slate-100'
-                            }`}
-                        >
-                            {type.label}
-                        </label>
-                         <div
-                          className="absolute bottom-full mb-2 w-max max-w-xs z-10 p-2 text-xs font-medium text-white bg-slate-900 rounded-lg shadow-sm opacity-0 group-hover:opacity-100 transition-opacity duration-300 pointer-events-none"
-                          role="tooltip"
-                        >
-                          {type.description}
-                          <div className="absolute top-full left-1/2 -translate-x-1/2 w-0 h-0 border-x-4 border-x-transparent border-t-4 border-t-slate-900" />
+        <div className="space-y-4">
+          <form onSubmit={handleSubmit}>
+            <div className="space-y-4">
+              {mode === 'dimension' ? (
+                 <div className="flex flex-col gap-1.5">
+                    <label htmlFor="target-dimension" className="text-sm font-medium text-slate-600 flex items-center gap-2">
+                        <RulerIcon className="w-5 h-5 text-slate-400" />
+                        {`Target ${dimensionTerm}`}
+                    </label>
+                    <div className="flex items-center gap-2">
+                        <div className="relative flex-grow">
+                            <input
+                                id="target-dimension"
+                                type="number"
+                                value={targetDimension}
+                                onChange={(e) => setTargetDimension(e.target.value)}
+                                className="w-full pl-4 pr-4 py-2 bg-slate-50 border border-slate-300 rounded-md shadow-sm focus:bg-white focus:ring-2 focus:ring-orange-500 focus:border-orange-500 transition"
+                                aria-label={`Target ${dimensionTerm}`}
+                            />
                         </div>
+                        <UnitSelector selectedUnit={inputUnit} onUnitChange={handleInputUnitChange} />
                     </div>
-                ))}
-            </div>
-          </fieldset>
+                </div>
+               ) : (
+                <InputField
+                    label={`Number of ${unitsTerm}`}
+                    value={numberOfUnits}
+                    onChange={(e) => setNumberOfUnits(e.target.value)}
+                    icon={<BrickIcon className="w-5 h-5 text-slate-400" />}
+                    step={isLength ? "0.5" : "1"}
+                />
+               )}
 
-          <div className="flex flex-col gap-1.5">
-            <label htmlFor="unit-type" className="text-sm font-medium text-slate-600 flex items-center gap-2">
-              <BrickIcon className="w-5 h-5 text-slate-500" />
-              Unit Type (Brick/Block)
-            </label>
-            <div className="relative">
-              <select
-                id="unit-type"
-                value={selectedBrickType}
-                onChange={handleBrickTypeChange}
-                className="w-full appearance-none bg-slate-50 pl-3 pr-10 py-2 border border-slate-300 rounded-md shadow-sm focus:bg-white focus:ring-2 focus:ring-orange-500 focus:border-orange-500 transition"
-                style={{
-                  backgroundImage: `url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%2364748b' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e")`,
-                  backgroundPosition: 'right 0.5rem center',
-                  backgroundRepeat: 'no-repeat',
-                  backgroundSize: '1.5em 1.5em',
-                }}
-              >
-                {BRICK_TYPES.map((brick) => (
-                  <option key={brick.name} value={brick.name}>
-                    {brick.name} ({isLength ? brick.length : brick.height}mm)
-                  </option>
-                ))}
-                <option value="Custom">Custom Dimensions</option>
-              </select>
-            </div>
-          </div>
-          
-          {selectedBrickType === 'Custom' && (
-            <InputField
-                label={`Custom Unit ${lengthTerm}`}
-                value={isLength ? brickLength : brickHeight}
-                onChange={(e) => isLength ? setBrickLength(e.target.value) : setBrickHeight(e.target.value)}
-                icon={<BrickIcon className="w-5 h-5 text-slate-400" />}
+              <fieldset className="flex flex-col gap-1.5">
+                <legend className="text-sm font-medium text-slate-600">Connection Type</legend>
+                <div className={`grid gap-1 bg-slate-200 p-1 rounded-md ${isLength ? 'grid-cols-3 md:grid-cols-5' : 'grid-cols-2'}`}>
+                    {connectionTypes.map(type => (
+                        <div key={type.id} className="relative group flex justify-center">
+                            <input
+                                type="radio"
+                                id={type.id}
+                                name="connectionType"
+                                value={type.id}
+                                checked={connectionType === type.id}
+                                onChange={() => setConnectionType(type.id as ConnectionType)}
+                                className="sr-only"
+                            />
+                            <label
+                                htmlFor={type.id}
+                                className={`w-full block text-center text-sm font-semibold py-2 px-1 rounded cursor-pointer transition-colors duration-200 ${
+                                    connectionType === type.id
+                                        ? 'bg-white text-orange-600 shadow-sm'
+                                        : 'bg-transparent text-slate-600 hover:bg-slate-100'
+                                }`}
+                            >
+                                {type.label}
+                            </label>
+                             <div
+                              className="absolute bottom-full mb-2 w-max max-w-xs z-10 p-2 text-xs font-medium text-white bg-slate-900 rounded-lg shadow-sm opacity-0 group-hover:opacity-100 transition-opacity duration-300 pointer-events-none"
+                              role="tooltip"
+                            >
+                              {type.description}
+                              <div className="absolute top-full left-1/2 -translate-x-1/2 w-0 h-0 border-x-4 border-x-transparent border-t-4 border-t-slate-900" />
+                            </div>
+                        </div>
+                    ))}
+                </div>
+              </fieldset>
+
+              <div className="flex flex-col gap-1.5">
+                <label htmlFor="unit-type" className="text-sm font-medium text-slate-600 flex items-center gap-2">
+                  <BrickIcon className="w-5 h-5 text-slate-500" />
+                  Unit Type (Brick/Block)
+                </label>
+                <div className="relative">
+                  <select
+                    id="unit-type"
+                    value={selectedBrickType}
+                    onChange={handleBrickTypeChange}
+                    className="w-full appearance-none bg-slate-50 pl-3 pr-10 py-2 border border-slate-300 rounded-md shadow-sm focus:bg-white focus:ring-2 focus:ring-orange-500 focus:border-orange-500 transition"
+                    style={{
+                      backgroundImage: `url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%2364748b' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e")`,
+                      backgroundPosition: 'right 0.5rem center',
+                      backgroundRepeat: 'no-repeat',
+                      backgroundSize: '1.5em 1.5em',
+                    }}
+                  >
+                    {BRICK_TYPES.map((brick) => (
+                      <option key={brick.name} value={brick.name}>
+                        {brick.name} ({isLength ? brick.length : brick.height}mm)
+                      </option>
+                    ))}
+                    <option value="Custom">Custom Dimensions</option>
+                  </select>
+                </div>
+              </div>
+              
+              {selectedBrickType === 'Custom' && (
+                <InputField
+                    label={`Custom Unit ${lengthTerm}`}
+                    value={isLength ? brickLength : brickHeight}
+                    onChange={(e) => isLength ? setBrickLength(e.target.value) : setBrickHeight(e.target.value)}
+                    icon={<BrickIcon className="w-5 h-5 text-slate-400" />}
+                    unit="mm"
+                />
+              )}
+
+              <InputField
+                label="Mortar Joint Thickness"
+                value={mortarJoint}
+                onChange={(e) => setMortarJoint(e.target.value)}
+                icon={<MortarIcon className="w-5 h-5 text-slate-500" />}
                 unit="mm"
-            />
-          )}
+              />
+              <button
+                type="submit"
+                className="w-full bg-orange-600 text-white font-semibold py-3 px-4 rounded-lg shadow-md hover:bg-orange-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-orange-500 transition duration-150 ease-in-out"
+              >
+                Calculate
+              </button>
+            </div>
+          </form>
 
-          <InputField
-            label="Mortar Joint Thickness"
-            value={mortarJoint}
-            onChange={(e) => setMortarJoint(e.target.value)}
-            icon={<MortarIcon className="w-5 h-5 text-slate-500" />}
-            unit="mm"
-          />
-          <button
-            type="submit"
-            className="w-full bg-orange-600 text-white font-semibold py-3 px-4 rounded-lg shadow-md hover:bg-orange-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-orange-500 transition duration-150 ease-in-out"
-          >
-            Calculate
-          </button>
-        </form>
+          <div className="pt-2">
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={handleSave}
+                className="flex-1 inline-flex items-center justify-center bg-slate-100 text-slate-700 font-semibold py-2 px-4 rounded-lg shadow-sm hover:bg-slate-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-slate-400 transition duration-150 ease-in-out"
+              >
+                <SaveIcon className="w-4 h-4 mr-2" />
+                Save
+              </button>
+              <button
+                type="button"
+                onClick={handleLoad}
+                disabled={!hasSavedData}
+                className="flex-1 inline-flex items-center justify-center bg-slate-100 text-slate-700 font-semibold py-2 px-4 rounded-lg shadow-sm hover:bg-slate-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-slate-400 transition duration-150 ease-in-out disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <LoadIcon className="w-4 h-4 mr-2" />
+                Load
+              </button>
+            </div>
+            {saveMessage && <p className="mt-2 text-sm text-center font-medium text-green-600 animate-pulse">{saveMessage}</p>}
+          </div>
+
+        </div>
       </div>
 
       <div className="bg-white p-6 rounded-xl shadow-lg sticky top-8">
@@ -573,7 +711,8 @@ const BrickCalculator: React.FC = () => {
                     <BrickVisualizer 
                       units={mode === 'dimension' ? (result?.units ?? 0) : (parseFloat(numberOfUnits) || 0)} 
                       unitLength={parseFloat(brickLength)} 
-                      mortarJoint={parseFloat(mortarJoint)} 
+                      mortarJoint={parseFloat(mortarJoint)}
+                      connectionType={connectionType}
                     />
                   ) : (
                     <HeightVisualizer 
