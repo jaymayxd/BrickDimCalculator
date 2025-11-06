@@ -1,0 +1,5 @@
+{
+  "name": "Brickwork Bond Calculator",
+  "description": "An application to calculate the number of bricks required for a specific dimension, adjusting the length to the nearest half-brick for a perfect bond.",
+  "requestFramePermissions": []
+}
